@@ -1,33 +1,64 @@
 const express = require('express');
 const cors = require('cors');
-const { createProxyMiddleware } = require('http-proxy-middleware');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enable CORS so Janitor AI can connect
 app.use(cors());
 
-// Route the traffic and clean the headers
-app.use('/', createProxyMiddleware({
-  target: 'https://agentrouter.org',
-  changeOrigin: true,
-  onProxyReq: (proxyReq, req, res) => {
-    // 1. Inject the authorized developer headers
-    proxyReq.setHeader('User-Agent', 'ClaudeCode/1.0.0');
-    proxyReq.setHeader('X-Stainless-Runtime', 'node');
-    proxyReq.setHeader('HTTP-Referer', 'https://github.com');
-    proxyReq.setHeader('X-Title', 'Local-Proxy');
-    
-    // 2. Strip the browser headers that expose Janitor AI
-    proxyReq.removeHeader('origin');
-    proxyReq.removeHeader('referer');
-    proxyReq.removeHeader('sec-fetch-dest');
-    proxyReq.removeHeader('sec-fetch-mode');
-    proxyReq.removeHeader('sec-fetch-site');
+// Captures the raw incoming chat text perfectly without stream drops
+app.use(express.raw({ type: 'application/json', limit: '10mb' }));
+
+app.all('*', async (req, res) => {
+  const targetUrl = `https://agentrouter.org${req.originalUrl}`;
+  
+  try {
+    const headers = {
+      'User-Agent': 'ClaudeCode/1.0.0',
+      'X-Stainless-Runtime': 'node',
+      'HTTP-Referer': 'https://github.com',
+      'X-Title': 'ClaudeCode',
+      'Content-Type': 'application/json'
+    };
+
+    // Forwards your AgentRouter API key automatically from Janitor AI
+    if (req.headers['authorization']) {
+      headers['Authorization'] = req.headers['authorization'];
+    }
+
+    const response = await fetch(targetUrl, {
+      method: req.method,
+      headers: headers,
+      body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
+      duplex: 'half'
+    });
+
+    res.status(response.status);
+
+    // Filter out encoding headers that warp text streams
+    for (const [key, value] of response.headers.entries()) {
+      if (!['content-encoding', 'transfer-encoding'].includes(key.toLowerCase())) {
+        res.setHeader(key, value);
+      }
+    }
+
+    // Streams the text chunks live into your chat box
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(value);
+      }
+    }
+    res.end();
+
+  } catch (err) {
+    console.error('Proxy Error:', err);
+    res.status(500).send({ error: 'Proxy failed', message: err.message });
   }
-}));
+});
 
 app.listen(PORT, () => {
-  console.log(`Proxy running on port ${PORT}`);
+  console.log(`Bypass proxy running on port ${PORT}`);
 });
